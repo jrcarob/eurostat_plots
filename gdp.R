@@ -1,8 +1,8 @@
 # ──────────────────────────────────────────────────────────────────[...]
-# Replicate Eurostat NUTS2 GDP per capita PPS map (2024) in R
+# Replicate Eurostat NUTS2 GDP per capita PPS map in R
 # EU=100, same bins & colours as the provided image
 # Requires: giscoR, ggplot2, sf, dplyr, readr/stringr, forcats
-# Data file: download from Eurostat → nama_10r_2gdp → filter 2024 → PPS % of EU27_2020
+# Data file: download from Eurostat → nama_10r_2gdp → PPS % of EU27_2020
 # File name example: nama_10r_2gdppc__custom_XXXXXX.tsv.gz  (or nama_10r_2gdp.tsv.gz)
 # ──────────────────────────────────────────────────────────────────[...]
 
@@ -21,7 +21,7 @@ library(countrycode) # optional – helps with country names if needed
 nuts2 <- gisco_get_nuts(
   resolution = "10",          # 1:1M scale
   nuts_level = "2",
-  year = "2021",              # 2024 data usually still uses NUTS 2021 geometry
+  year = "2021",              # NUTS 2021 geometry
   epsg = 3035,                # LAEA – good for Europe
   cache = TRUE
 )
@@ -29,7 +29,7 @@ nuts2 <- gisco_get_nuts(
 # ─── 2. Read Eurostat data (adjust filename) ────────────────────────────────────
 # Download → https://ec.europa.eu/eurostat/databrowser/product/view/nama_10r_2gdp
 # Choose: geo × unit × time → PPS_HAB_EU27_2020 (or PPS per inhab % EU27_2020 avg)
-# Filter year 2024 → download .tsv.gz
+# Download .tsv.gz (script will automatically use the most recent year available)
 
 file_path <- "nama_10r_2gdpc.tsv.gz"   # ← change to your downloaded file name
 
@@ -41,8 +41,8 @@ raw <- read_tsv(file_path,
 
 # ─── DATA CLEANING PIPELINE ─────────────────────────────────────────────────────
 # The Eurostat TSV format has:
-# - First column with geo\time format (e.g., "FR10\2024", "DE11\2023")
-# - Subsequent columns with unit & year combinations
+# - First column with geo code (e.g., "FR10", "DE11")
+# - Subsequent columns with year × unit combinations (e.g., "2024 PPS_HAB_EU27_2020")
 
 # Rename first column for clarity
 colnames(raw)[1] <- "geo_time"
@@ -56,6 +56,9 @@ df <- raw |>
   ) |>
   # Remove the original compound column
   select(-geo_time) |>
+  # Convert all data columns to character BEFORE pivoting to handle mixed types
+  # (some columns may be numeric, others character with missing markers like ":")
+  mutate(across(-geo, as.character)) |>
   # Pivot from wide (one column per time period) to long format
   pivot_longer(
     cols = -geo, 
@@ -69,19 +72,23 @@ df <- raw |>
     # Clean up whitespace in unit column
     unit = str_trim(unit)
   ) |>
-  # Filter for 2024 data only and remove missing values
+  # Convert year to numeric for comparison
+  mutate(year_numeric = as.numeric(year)) |>
+  # Filter for the most recent year available in the dataset
+  filter(year_numeric == max(year_numeric, na.rm = TRUE)) |>
+  # Remove missing values and invalid entries
   filter(
-    year == "2024",
     !is.na(value),
     value != ":",
-    value != ""
+    value != "",
+    !is.na(year_numeric)
   ) |>
-  # Convert to numeric
+  # Convert value to numeric
   mutate(value = as.numeric(value)) |>
   # Keep only geo and value columns
   select(geo, value) |>
   # Remove rows where geo extraction failed (rows with country totals or invalid codes)
-  filter(!is.na(geo), str_length(geo) >= 3) |>
+  filter(!is.na(geo), str_length(geo) >= 3, !is.na(value)) |>
   # Remove duplicates if any
   distinct(geo, .keep_all = TRUE)
 
@@ -89,8 +96,19 @@ df <- raw |>
 df <- df |> rename(pps_eu100 = value)
 
 # Quick check
+max_year <- max(as.numeric(str_extract(raw |> 
+  mutate(
+    geo = str_extract(geo_time, "^[A-Z]{2}[A-Z0-9]{1,2}"),
+    .before = 1
+  ) |>
+  select(-geo_time) |>
+  mutate(across(-geo, as.character)) |>
+  pivot_longer(cols = -geo, names_to = "year_unit", values_to = "value") |>
+  pull(year_unit), "\\d{4}")), na.rm = TRUE)
+
 cat("Data loaded successfully!\n")
-cat("Number of NUTS2 regions with 2024 data:", nrow(df), "\n")
+cat("Most recent year in dataset:", max_year, "\n")
+cat("Number of NUTS2 regions with data:", nrow(df), "\n")
 cat("Summary of PPS values:\n")
 print(summary(df$pps_eu100))
 
@@ -141,7 +159,7 @@ nuts2 <- nuts2 |>
     cat = factor(cat, levels = names(pal))
   )
 
-# ─── 6. Plot ─────────────────────────────────────────────────────────────────────
+# ─── 6. Plot ────────────────────────────────────────────────────────────[...]
 ggplot() +
   # background (sea-ish)
   geom_sf(
@@ -177,10 +195,10 @@ ggplot() +
     plot.background = element_rect(fill = "white", color = NA)
   ) +
   labs(
-    title = "GDP per capita by NUTS 2 regions, 2024",
+    title = paste("GDP per capita by NUTS 2 regions,", max_year),
     subtitle = "(in purchasing power standards (PPS), EU=100)",
-    caption = "Source: Eurostat – nama_10r_2gdp (2024 data) • Cartography: giscoR / EuroGeographics © • Reproduction with kind permission"
+    caption = "Source: Eurostat – nama_10r_2gdp • Cartography: giscoR / EuroGeographics © • Reproduction with kind permission"
   )
 
 # Optional: save high-res
-# ggsave("gdp_per_capita_nuts2_2024_pps.png", width = 12, height = 10, dpi = 320)
+# ggsave(paste0("gdp_per_capita_nuts2_", max_year, "_pps.png"), width = 12, height = 10, dpi = 320)
