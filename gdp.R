@@ -45,17 +45,10 @@ raw <- read_tsv(file_path,
 # - Subsequent columns with year × unit combinations (e.g., "2024 PPS_HAB_EU27_2020")
 
 # Rename first column for clarity
-colnames(raw)[1] <- "geo_time"
+colnames(raw)[1] <- "geo"
 
-# Parse the geo_time column which contains both geo code and metadata
+# Parse the geo column - the first column is already the geo code
 df <- raw |>
-  # Extract geo code (2-letter country + 1-2 digit NUTS code)
-  mutate(
-    geo = str_extract(geo_time, "^[A-Z]{2}[A-Z0-9]{1,2}"),
-    .before = 1
-  ) |>
-  # Remove the original compound column
-  select(-geo_time) |>
   # Convert all data columns to character BEFORE pivoting to handle mixed types
   # (some columns may be numeric, others character with missing markers like ":")
   mutate(across(-geo, as.character)) |>
@@ -88,7 +81,8 @@ df <- raw |>
   # Keep only geo and value columns
   select(geo, value) |>
   # Remove rows where geo extraction failed (rows with country totals or invalid codes)
-  filter(!is.na(geo), str_length(geo) >= 3, !is.na(value)) |>
+  # NUTS2 codes are typically 4 characters (e.g., FR10, DE11, IT1C)
+  filter(!is.na(geo), str_length(geo) == 4, !is.na(value)) |>
   # Remove duplicates if any
   distinct(geo, .keep_all = TRUE)
 
@@ -97,11 +91,6 @@ df <- df |> rename(pps_eu100 = value)
 
 # Quick check
 max_year <- max(as.numeric(str_extract(raw |> 
-  mutate(
-    geo = str_extract(geo_time, "^[A-Z]{2}[A-Z0-9]{1,2}"),
-    .before = 1
-  ) |>
-  select(-geo_time) |>
   mutate(across(-geo, as.character)) |>
   pivot_longer(cols = -geo, names_to = "year_unit", values_to = "value") |>
   pull(year_unit), "\\d{4}")), na.rm = TRUE)
@@ -159,7 +148,7 @@ nuts2 <- nuts2 |>
     cat = factor(cat, levels = names(pal))
   )
 
-# ─── 6. Plot ────────────────────────────────────────────────────────────[...]
+# ─── 6. Plot ──────────────────────────────────────────────────────────[...]
 ggplot() +
   # background (sea-ish)
   geom_sf(
