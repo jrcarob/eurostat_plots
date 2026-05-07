@@ -1,10 +1,10 @@
-# ────────────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────[...]
 # Replicate Eurostat NUTS2 GDP per capita PPS map (2024) in R
 # EU=100, same bins & colours as the provided image
-# Requires: giscoR, ggplot2, sf, dplyr, readr/stringr
+# Requires: giscoR, ggplot2, sf, dplyr, readr/stringr, forcats
 # Data file: download from Eurostat → nama_10r_2gdp → filter 2024 → PPS % of EU27_2020
 # File name example: nama_10r_2gdppc__custom_XXXXXX.tsv.gz  (or nama_10r_2gdp.tsv.gz)
-# ────────────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────[...]
 
 library(sf)
 library(ggplot2)
@@ -13,6 +13,7 @@ library(dplyr)
 library(giscoR)     # high-quality Europe NUTS maps
 library(readr)
 library(stringr)
+library(forcats)
 library(countrycode) # optional – helps with country names if needed
 
 # ─── 1. Download NUTS 2021 or 2024 geometry (giscoR uses latest available) ───────
@@ -32,34 +33,75 @@ nuts2 <- gisco_get_nuts(
 
 file_path <- "nama_10r_2gdpc.tsv.gz"   # ← change to your downloaded file name
 
-raw <- read_tsv(file_path, na = c(":", ":", " ", ""), trim_ws = TRUE,
+# Read with more robust NA handling
+raw <- read_tsv(file_path, 
+                na = c(":", " ", ""), 
+                trim_ws = TRUE,
                 show_col_types = FALSE)
 
-# Clean column names & pivot (Eurostat TSV has ugly first column)
+# ─── DATA CLEANING PIPELINE ─────────────────────────────────────────────────────
+# The Eurostat TSV format has:
+# - First column with geo\time format (e.g., "FR10\2024", "DE11\2023")
+# - Subsequent columns with unit & year combinations
+
+# Rename first column for clarity
 colnames(raw)[1] <- "geo_time"
 
+# Parse the geo_time column which contains both geo code and metadata
 df <- raw |>
-  mutate(geo = str_extract(geo_time, "^[A-Z]{2}[A-Z0-9]{1,2}$"),
-         .before = 1) |>
+  # Extract geo code (2-letter country + 1-2 digit NUTS code)
+  mutate(
+    geo = str_extract(geo_time, "^[A-Z]{2}[A-Z0-9]{1,2}"),
+    .before = 1
+  ) |>
+  # Remove the original compound column
   select(-geo_time) |>
-  pivot_longer(cols = -geo, names_to = "year_unit", values_to = "value") |>
-  mutate(year = str_extract(year_unit, "\\d{4}"),
-         unit = str_remove(year_unit, "\\d{4}")) |>
-  filter(year == "2024", !is.na(value), value != ":") |>
+  # Pivot from wide (one column per time period) to long format
+  pivot_longer(
+    cols = -geo, 
+    names_to = "year_unit", 
+    values_to = "value"
+  ) |>
+  # Extract year from column name (finds first 4-digit sequence)
+  mutate(
+    year = str_extract(year_unit, "\\d{4}"),
+    unit = str_remove(year_unit, "\\d{4}"),
+    # Clean up whitespace in unit column
+    unit = str_trim(unit)
+  ) |>
+  # Filter for 2024 data only and remove missing values
+  filter(
+    year == "2024",
+    !is.na(value),
+    value != ":",
+    value != ""
+  ) |>
+  # Convert to numeric
   mutate(value = as.numeric(value)) |>
+  # Keep only geo and value columns
   select(geo, value) |>
-  filter(str_length(geo) >= 3)          # remove country totals if present
+  # Remove rows where geo extraction failed (rows with country totals or invalid codes)
+  filter(!is.na(geo), str_length(geo) >= 3) |>
+  # Remove duplicates if any
+  distinct(geo, .keep_all = TRUE)
 
 # Rename value column to match map legend
 df <- df |> rename(pps_eu100 = value)
 
 # Quick check
-summary(df$pps_eu100)
+cat("Data loaded successfully!\n")
+cat("Number of NUTS2 regions with 2024 data:", nrow(df), "\n")
+cat("Summary of PPS values:\n")
+print(summary(df$pps_eu100))
+
+# Verify join will work
+cat("\nSample of geo codes in data:", head(df$geo, 10), "\n")
+cat("Sample of NUTS_ID in geometry:", head(nuts2$NUTS_ID, 10), "\n")
 
 # ─── 3. Define the same bins & colours as the original map ───────────────────────
 # From legend:
 # ≥125        dark blue
-# 105–<125    light blue
+# 100–<125    light blue
 # 75–<100     very light pink/purple
 # 50–<75      medium purple
 # <50         dark purple
@@ -73,43 +115,57 @@ pal <- c(
   "50 – <75"   = "#7b1fa2",   # medium purple
   "75 – <100"  = "#ba68c8",   # light pink-purple
   "100 – <125" = "#90caf9",   # light blue
-  "≥ 125"      = "#0d47a1"    # dark blue
+  "≥ 125"      = "#0d47a1",   # dark blue
+  "Data not available" = "grey75"  # grey for missing
 )
 
-# Classify
+# ─── 4. Classify data into bins ──────────────────────────────────────────────────
 df <- df |>
   mutate(
-    cat = cut(pps_eu100,
-              breaks = breaks,
-              labels = labels,
-              right = FALSE,
-              include.lowest = TRUE),
-    cat = forcats::fct_rev(cat)   # so legend goes high → low
+    cat = cut(
+      pps_eu100,
+      breaks = breaks,
+      labels = labels,
+      right = FALSE,
+      include.lowest = TRUE
+    )
   )
 
-# ─── 4. Join data to geometry ───────────────────────────────────────────────────
+# ─── 5. Join data to geometry and handle missing values ────────────────────────────
 nuts2 <- nuts2 |>
   left_join(df, by = c("NUTS_ID" = "geo")) |>
-  mutate(cat = replace(cat, is.na(cat), "Data not available"))
+  # Replace NA categories with "Data not available" as a string first
+  mutate(
+    cat = if_else(is.na(cat), "Data not available", as.character(cat)),
+    # Convert to factor with all levels including "Data not available"
+    cat = factor(cat, levels = names(pal))
+  )
 
-# Add "Data not available" to palette
-pal["Data not available"] <- "grey75"
-
-# ─── 5. Plot – try to match style closely ───────────────────────────────────────
+# ─── 6. Plot ─────────────────────────────────────────────────────────────────────
 ggplot() +
   # background (sea-ish)
-  geom_sf(data = gisco_get_countries(resolution = "10", epsg = 3035),
-          fill = "#e0f7fa", color = NA) +   # very light cyan
+  geom_sf(
+    data = gisco_get_countries(resolution = "10", epsg = 3035),
+    fill = "#e0f7fa", 
+    color = NA
+  ) +   # very light cyan
   # main choropleth
-  geom_sf(data = nuts2,
-          aes(fill = cat),
-          color = "white", linewidth = 0.12) +
-  scale_fill_manual(values = pal,
-                    name = "PPS (EU=100)",
-                    drop = FALSE,
-                    guide = guide_legend(reverse = TRUE)) +
-  coord_sf(xlim = c(1000000, 6500000), ylim = c(1000000, 5500000),
-           expand = FALSE) +   # crop roughly to Europe
+  geom_sf(
+    data = nuts2,
+    aes(fill = cat),
+    color = "white", 
+    linewidth = 0.12
+  ) +
+  scale_fill_manual(
+    values = pal,
+    name = "PPS (EU=100)",
+    drop = FALSE
+  ) +
+  coord_sf(
+    xlim = c(1000000, 6500000), 
+    ylim = c(1000000, 5500000),
+    expand = FALSE
+  ) +   # crop roughly to Europe
   theme_void(base_size = 11) +
   theme(
     legend.position = "right",
